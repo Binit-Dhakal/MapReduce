@@ -26,26 +26,24 @@ const (
 )
 
 type Task struct {
-	ID        int
-	Type      TaskType
-	Input     string
-	State     Status
-	MachineID int
+	ID         int
+	Type       TaskType
+	Input      string
+	State      Status
+	WorkerAddr string // for non-idle task
 }
 
 type MapTaskOutput struct {
-	TaskID    int
-	WorkerID  int
-	Filenames []string
+	TaskID     int
+	WorkerAddr string
+	Filenames  []string
 }
 
 type Coordinator struct {
-	Tasks             []*Task
-	IntermediateFiles []*MapTaskOutput
-	Workers           map[int]*Worker
-	NextWorkerID      int
+	Tasks             []*Task            // all tasks
+	IntermediateFiles []*MapTaskOutput   // all results from map
+	Workers           map[string]*Worker // active workers
 	ReduceNum         int
-	CurrReduceNum     int
 	mu                sync.Mutex
 }
 
@@ -53,30 +51,26 @@ func NewCoordinator(files []string, nReduce int) *Coordinator {
 	c := &Coordinator{
 		Tasks:             make([]*Task, 0),
 		IntermediateFiles: make([]*MapTaskOutput, 0),
-		Workers:           map[int]*Worker{},
-		NextWorkerID:      0,
-		CurrReduceNum:     0,
+		Workers:           map[string]*Worker{},
 		ReduceNum:         nReduce,
 	}
 
 	// map tasks
 	for i, file := range files {
 		c.Tasks = append(c.Tasks, &Task{
-			ID:        i,
-			Type:      Map,
-			Input:     file,
-			State:     Idle,
-			MachineID: 0,
+			ID:    i,
+			Type:  Map,
+			Input: file,
+			State: Idle,
 		})
 	}
 
 	// reduce tasks
 	for i := range nReduce {
 		c.Tasks = append(c.Tasks, &Task{
-			ID:        i,
-			Type:      Reduce,
-			State:     Idle,
-			MachineID: 0,
+			ID:    i,
+			Type:  Reduce,
+			State: Idle,
 		})
 	}
 
@@ -88,11 +82,9 @@ func (c *Coordinator) AssignTask(args *AssignTaskArgs, reply *AssignTaskReply) e
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	workerID := args.WorkerID
-
 	for _, task := range c.Tasks {
 		if task.Type == Map && task.State == Idle {
-			task.MachineID = workerID
+			task.WorkerAddr = args.WorkerAddr
 			task.State = InProgress
 
 			reply.TaskID = task.ID
@@ -111,19 +103,17 @@ func (c *Coordinator) AssignTask(args *AssignTaskArgs, reply *AssignTaskReply) e
 		}
 	}
 
-	// if all maps are completed then we will start assigning reduce task
-	// although assigning reduce task only after all reduce task is kinda slow
+	// we assign reduce task if all map task is completed
 	if allMapsCompleted {
-		// need to assign reduce task
 		log.Println("All map tasks are complete. Assigning a reduce task.")
 		for _, task := range c.Tasks {
 			if task.Type == Reduce && task.State == Idle {
-				task.MachineID = workerID
+				task.WorkerAddr = args.WorkerAddr
 				task.State = InProgress
 
 				outputLocations := make([]MapOutputLocation, 0)
 				for _, output := range c.IntermediateFiles {
-					address := c.Workers[output.WorkerID].Address
+					address := c.Workers[output.WorkerAddr].Address
 					outputLocations = append(outputLocations, MapOutputLocation{
 						TaskID:        output.TaskID,
 						PartID:        task.ID,
@@ -134,7 +124,6 @@ func (c *Coordinator) AssignTask(args *AssignTaskArgs, reply *AssignTaskReply) e
 				reply.TaskID = task.ID
 				reply.MapOutputLocations = outputLocations
 				reply.TaskType = task.Type
-				c.CurrReduceNum++
 				return nil
 			}
 		}
@@ -174,25 +163,6 @@ func (c *Coordinator) Done() bool {
 	return allDone
 }
 
-// Register worker to our coordinator
-func (c *Coordinator) RegisterWorker(args *RegisterWorkerArgs, reply *RegisterWorkerReply) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	workerID := c.NextWorkerID
-
-	c.Workers[workerID] = &Worker{
-		ID:       c.NextWorkerID,
-		Address:  args.Address,
-		LastSeen: time.Now(),
-	}
-
-	reply.WorkerID = workerID
-	c.NextWorkerID++
-
-	return nil
-}
-
 func (c *Coordinator) MapTaskComplete(args *MapTaskCompleteArgs, reply *MapTaskCompleteReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -206,15 +176,12 @@ func (c *Coordinator) MapTaskComplete(args *MapTaskCompleteArgs, reply *MapTaskC
 	task.State = Completed
 
 	c.IntermediateFiles = append(c.IntermediateFiles, &MapTaskOutput{
-		TaskID:    args.TaskID,
-		WorkerID:  args.WorkerID,
-		Filenames: args.IntermediateFiles,
+		WorkerAddr: args.WorkerAddr,
+		TaskID:     args.TaskID,
+		Filenames:  args.IntermediateFiles,
 	})
 
-	// to not check worker
-	delete(c.Workers, args.WorkerID)
-
-	log.Printf("Worker %d completed Map task %d", args.WorkerID, args.TaskID)
+	log.Printf("Worker %d completed Map task %d", args.WorkerAddr, args.TaskID)
 	reply.Success = true
 
 	return nil
@@ -234,8 +201,29 @@ func (c *Coordinator) ReportHeartbeat(args *ReportHeartbeatArgs, reply *ReportHe
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.Workers[args.WorkerID].LastSeen = time.Now()
+	c.Workers[args.WorkerAddr].LastSeen = time.Now()
 
 	return nil
+}
 
+func (c *Coordinator) checkHeartbeat() {
+	for {
+		for workerAddr, worker := range c.Workers {
+			// failure of worker machine to send heartbeat
+			if worker.LastSeen.Add(6 * time.Second).After(time.Now()) {
+				c.makeAllTaskIdle(workerAddr)
+				delete(c.Workers, workerAddr)
+			}
+		}
+		time.Sleep(1)
+	}
+}
+
+// convert all in-progress and completed task by workerAddr to idle
+func (c *Coordinator) makeAllTaskIdle(workerAddr string) {
+	for _, task := range c.Tasks {
+		if task.WorkerAddr == workerAddr {
+			task.State = Idle
+		}
+	}
 }

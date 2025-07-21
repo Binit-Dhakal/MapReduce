@@ -11,8 +11,7 @@ import (
 )
 
 type Worker struct {
-	ID       int
-	Address  string
+	Address  string // identity of worker machine
 	LastSeen time.Time
 
 	MapWorkerLogic
@@ -24,46 +23,39 @@ func NewWorker(mapf MapFunc, reducef ReduceFunc) {
 
 	coordinatorSockName := coordinatorSock()
 
-	args := RegisterWorkerArgs{
-		Address: sockname,
-	}
-	reply := RegisterWorkerReply{}
-	ok := call("Coordinator.RegisterWorker", &args, &reply, coordinatorSockName)
-	if ok {
-		log.Printf("Worker registered, Id: %d", reply.WorkerID)
-	} else {
-		return
-	}
-	workerID := reply.WorkerID
-
 	// poll the server to check for if there are any tasks
 	assignArgs := AssignTaskArgs{
-		WorkerID: workerID,
+		WorkerAddr: sockname,
 	}
 	assignReply := AssignTaskReply{}
 
-	ok = call("Coordinator.AssignTask", &assignArgs, &assignReply, coordinatorSockName)
-	if !ok {
-		log.Println("Not assigned any task")
-	}
+	go w.pingCoordinator(sockname)
 
-	taskID := assignReply.TaskID
-	partitionCount := assignReply.PartitionCount
+	for {
+		ok := call("Coordinator.AssignTask", &assignArgs, &assignReply, coordinatorSockName)
+		if !ok {
+			log.Println("Not assigned any task")
+		}
 
-	switch assignReply.TaskType {
-	case Map:
-		mapWorker := NewMapWorker(
-			workerID, assignReply.TaskFile, taskID, partitionCount, mapf,
-		)
-		mapWorker.ExecuteMap()
+		taskID := assignReply.TaskID
+		partitionCount := assignReply.PartitionCount
 
-	case Reduce:
-		reduceWorker := NewReduceWorker(
-			workerID, assignReply.TaskID, reducef, assignReply.MapOutputLocations,
-		)
-		reduceWorker.ExecuteReduce()
+		switch assignReply.TaskType {
+		case Map:
+			mapWorker := NewMapWorker(
+				sockname, assignReply.TaskFile, taskID, partitionCount, mapf,
+			)
+			mapWorker.ExecuteMap()
 
-	default:
+		case Reduce:
+			reduceWorker := NewReduceWorker(
+				sockname, assignReply.TaskID, reducef, assignReply.MapOutputLocations,
+			)
+			reduceWorker.ExecuteReduce()
+
+		default:
+		}
+		time.Sleep(5 * time.Second)
 	}
 }
 
@@ -82,12 +74,12 @@ func (w *Worker) startWorkerServer() string {
 	return sockName
 }
 
-func (w *Worker) pingCoordinator(workerID int) {
+func (w *Worker) pingCoordinator(workerAddr string) {
 	coordinatorSockName := coordinatorSock()
 
 	ticker := time.NewTicker(2 * time.Second)
 	args := &ReportHeartbeatArgs{
-		WorkerID: workerID,
+		WorkerAddr: workerAddr,
 	}
 	reply := &ReportHeartbeatReply{}
 

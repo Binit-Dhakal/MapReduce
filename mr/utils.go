@@ -5,7 +5,7 @@ type KeyValue struct {
 	Value string
 }
 
-// Sort
+// Sort - map phase
 type ByKey []KeyValue
 
 func (k ByKey) Len() int           { return len(k) }

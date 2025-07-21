@@ -15,29 +15,20 @@ type MapOutputLocation struct {
 }
 
 type AssignTaskArgs struct {
-	WorkerID int
+	WorkerAddr string
 }
 
 type AssignTaskReply struct {
 	TaskID             int
 	TaskFile           string // map
 	TaskType           TaskType
-	PartitionCount     int // map
-	MapOutputLocations []MapOutputLocation
-}
-
-// RegisterWorker
-type RegisterWorkerArgs struct {
-	Address string
-}
-
-type RegisterWorkerReply struct {
-	WorkerID int
+	PartitionCount     int                 // map
+	MapOutputLocations []MapOutputLocation // reduce
 }
 
 // MapTaskComplete
 type MapTaskCompleteArgs struct {
-	WorkerID          int
+	WorkerAddr        string
 	TaskID            int
 	IntermediateFiles []string
 }
@@ -57,7 +48,7 @@ type GetIntermediateFileReply struct {
 
 // ReportHeartbeat
 type ReportHeartbeatArgs struct {
-	WorkerID int
+	WorkerAddr string
 }
 
 type ReportHeartbeatReply struct {

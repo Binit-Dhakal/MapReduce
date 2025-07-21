@@ -11,19 +11,19 @@ import (
 type MapWorker struct {
 	taskFile            string
 	taskID              int
-	partitionCount      int
-	workerID            int
+	totalPartition      int
+	workerAddr          string
 	mapfunc             MapFunc
 	coordinatorSockName string
 }
 
-func NewMapWorker(workerID int, taskfile string, taskID int, partitionCount int, mapper MapFunc) *MapWorker {
+func NewMapWorker(workerAddr string, taskfile string, taskID int, totalPartition int, mapper MapFunc) *MapWorker {
 	coordinatorSockName := coordinatorSock()
 	return &MapWorker{
 		taskFile:            taskfile,
 		taskID:              taskID,
-		partitionCount:      partitionCount,
-		workerID:            workerID,
+		totalPartition:      totalPartition,
+		workerAddr:          workerAddr,
 		mapfunc:             mapper,
 		coordinatorSockName: coordinatorSockName,
 	}
@@ -39,16 +39,16 @@ func (m *MapWorker) ExecuteMap() {
 	// cseweb.ucsd.edu/classes/sp16/cse291-e/applications/ln/lecture14.html
 	sort.Sort(ByKey(intermediate))
 
-	m.saveIntermediate(intermediate, m.taskID, m.partitionCount)
+	m.saveIntermediate(intermediate, m.taskID, m.totalPartition)
 
-	intermediateFiles := make([]string, m.partitionCount)
-	for i := range m.partitionCount {
+	intermediateFiles := make([]string, m.totalPartition)
+	for i := range m.totalPartition {
 		filename := fmt.Sprintf("task-%d-part-%d", m.taskID, i)
 		intermediateFiles[i] = filename
 	}
 
 	completeArgs := &MapTaskCompleteArgs{
-		WorkerID:          m.workerID,
+		WorkerAddr:        m.workerAddr,
 		TaskID:            m.taskID,
 		IntermediateFiles: intermediateFiles,
 	}

@@ -8,15 +8,15 @@ import (
 )
 
 type ReduceWorker struct {
-	workerID        int
+	workerAddr      string
 	reduceID        int
 	reducef         ReduceFunc
 	outputLocations []MapOutputLocation
 }
 
-func NewReduceWorker(workerID int, reduceID int, reducef ReduceFunc, outputLocations []MapOutputLocation) *ReduceWorker {
+func NewReduceWorker(workerAddr string, reduceID int, reducef ReduceFunc, outputLocations []MapOutputLocation) *ReduceWorker {
 	return &ReduceWorker{
-		workerID:        workerID,
+		workerAddr:      workerAddr,
 		reduceID:        reduceID,
 		reducef:         reducef,
 		outputLocations: outputLocations,
@@ -49,10 +49,10 @@ func (r *ReduceWorker) findFileForPartition(outputs []MapOutputLocation, reduceI
 			&reply,
 			output.WorkerAddress,
 		)
+		// TODO: inform coordinator that we couldn't connect with the worker so coordinator
+		// can mark the worker as failed
 		if !ok {
 			log.Printf("Worker %s is not responding to get file %s", output.WorkerAddress, filename)
-			// TODO: inform coordinator that we couldn't connect with the worker so coordinator
-			// can mark the worker as failed
 			continue
 		}
 
