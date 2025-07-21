@@ -1,6 +1,8 @@
 package mr
 
 import (
+	"bufio"
+	"container/heap"
 	"fmt"
 	"log"
 	"os"
@@ -12,6 +14,7 @@ type ReduceWorker struct {
 	reduceID        int
 	reducef         ReduceFunc
 	outputLocations []MapOutputLocation
+	outputFiles     []string
 }
 
 func NewReduceWorker(workerAddr string, reduceID int, reducef ReduceFunc, outputLocations []MapOutputLocation) *ReduceWorker {
@@ -29,6 +32,48 @@ func NewReduceWorker(workerAddr string, reduceID int, reducef ReduceFunc, output
 // 4. call reduce function
 func (r *ReduceWorker) ExecuteReduce() {
 	r.findFileForPartition(r.outputLocations, r.reduceID)
+
+	finalFile, err := os.OpenFile(
+		fmt.Sprintf("reducer_%d", r.reduceID),
+		os.O_WRONLY|os.O_CREATE|os.O_APPEND,
+		0644,
+	)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+
+	defer finalFile.Close()
+
+	writer := bufio.NewWriter(finalFile)
+	defer writer.Flush()
+
+	var currentKey string
+	var currentValues []string
+
+	count := 0
+	for sortedPair := range r.mergeSortIterator() {
+		if currentKey == "" || sortedPair.Key != currentKey {
+			if len(currentValues) > 0 {
+				result := r.reducef(currentKey, currentValues)
+				writer.WriteString(fmt.Sprintf("%s %v\n", currentKey, result))
+			}
+			// start new group
+			currentKey = sortedPair.Key
+			currentValues = []string{sortedPair.Value}
+			count++
+		} else {
+			currentValues = append(currentValues, sortedPair.Value)
+		}
+
+		if count%1000 == 0 {
+			writer.Flush()
+		}
+	}
+
+	if len(currentValues) > 0 {
+		result := r.reducef(currentKey, currentValues)
+		writer.WriteString(fmt.Sprintf("%s %v\n", currentKey, result))
+	}
 }
 
 // save all intermediate files(specific to this partition) to our local disk
@@ -67,6 +112,59 @@ func (r *ReduceWorker) findFileForPartition(outputs []MapOutputLocation, reduceI
 			log.Fatalf("Failed to write to temp file: %v", err)
 		}
 
+		r.outputFiles = append(r.outputFiles, tempFilePath)
 		tempFile.Close()
 	}
+}
+
+func (r *ReduceWorker) mergeSortIterator() <-chan KeyValue {
+	// TODO: try benchmarking with buffered channel to see if things speed up
+	ch := make(chan KeyValue)
+
+	go func() {
+		defer close(ch)
+
+		readers := make([]*bufio.Scanner, len(r.outputFiles))
+		files := make([]*os.File, len(r.outputFiles))
+
+		for i := range files {
+			f, err := os.Open(r.outputFiles[i])
+			if err != nil {
+				panic(err)
+			}
+			files[i] = f
+		}
+		defer func() {
+			for _, f := range files {
+				f.Close()
+			}
+		}()
+
+		for i, f := range files {
+			readers[i] = bufio.NewScanner(f)
+		}
+
+		h := &MinHeap{}
+		heap.Init(h)
+
+		for i, reader := range readers {
+			if reader.Scan() {
+				key, val := parseLine(reader.Text())
+				heap.Push(h, &ReduceSortItem{Key: key, Value: val, FileID: i})
+			}
+		}
+
+		for h.Len() > 0 {
+			item := heap.Pop(h).(*ReduceSortItem)
+			ch <- KeyValue{Key: item.Key, Value: item.Value}
+
+			reader := readers[item.FileID]
+			if reader.Scan() {
+				key, value := parseLine(reader.Text())
+				heap.Push(h, &ReduceSortItem{Key: key, Value: value, FileID: item.FileID})
+			}
+		}
+	}()
+
+	return ch
 }
