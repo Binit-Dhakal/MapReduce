@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"fmt"
 	"hash/fnv"
 	"log"
 	"net"
@@ -13,6 +14,7 @@ import (
 type Worker struct {
 	Address  string // identity of worker machine
 	LastSeen time.Time
+	assigned bool
 
 	MapWorkerLogic
 }
@@ -20,6 +22,7 @@ type Worker struct {
 func NewWorker(mapf MapFunc, reducef ReduceFunc) {
 	w := &Worker{}
 	sockname := w.startWorkerServer()
+	w.Address = sockname
 
 	coordinatorSockName := coordinatorSock()
 
@@ -27,17 +30,24 @@ func NewWorker(mapf MapFunc, reducef ReduceFunc) {
 	assignArgs := AssignTaskArgs{
 		WorkerAddr: sockname,
 	}
-	assignReply := AssignTaskReply{}
 
-	go w.pingCoordinator(sockname)
+	go w.pingCoordinator()
 
 	for {
+		assignReply := AssignTaskReply{}
 		ok := call("Coordinator.AssignTask", &assignArgs, &assignReply, coordinatorSockName)
 		if !ok {
 			log.Println("Not assigned any task")
+			continue
 		}
 
 		taskID := assignReply.TaskID
+		if taskID == -1 {
+			time.Sleep(3 * time.Second)
+			continue
+		}
+		fmt.Printf("Assigned Task- %v, ID-%d\n", assignReply.TaskType, assignReply.TaskID)
+
 		partitionCount := assignReply.PartitionCount
 
 		switch assignReply.TaskType {
@@ -53,9 +63,7 @@ func NewWorker(mapf MapFunc, reducef ReduceFunc) {
 			)
 			reduceWorker.ExecuteReduce()
 
-		default:
 		}
-		time.Sleep(5 * time.Second)
 	}
 }
 
@@ -74,20 +82,17 @@ func (w *Worker) startWorkerServer() string {
 	return sockName
 }
 
-func (w *Worker) pingCoordinator(workerAddr string) {
+func (w *Worker) pingCoordinator() {
 	coordinatorSockName := coordinatorSock()
 
 	ticker := time.NewTicker(2 * time.Second)
 	args := &ReportHeartbeatArgs{
-		WorkerAddr: workerAddr,
+		WorkerAddr: w.Address,
 	}
 	reply := &ReportHeartbeatReply{}
 
-	for {
-		select {
-		case <-ticker.C:
-			call("Coordinator.ReportHeartBeat", args, reply, coordinatorSockName)
-		}
+	for range ticker.C {
+		call("Coordinator.ReportHeartbeat", args, reply, coordinatorSockName)
 	}
 }
 

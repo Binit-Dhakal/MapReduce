@@ -37,6 +37,16 @@ type MapTaskCompleteReply struct {
 	Success bool
 }
 
+// ReduceTaskComplete
+type ReduceTaskReportArgs struct {
+	TaskID int
+	Status Status
+}
+
+type ReduceTaskReportReply struct {
+	Success bool
+}
+
 // GetIntermediateFiles
 type GetIntermediateFileArgs struct {
 	Filename string
@@ -74,6 +84,6 @@ func call(rpcname string, args any, reply any, sockname string) bool {
 		return true
 	}
 
-	log.Println(err)
+	log.Println("RPC Call Error: ", err)
 	return false
 }

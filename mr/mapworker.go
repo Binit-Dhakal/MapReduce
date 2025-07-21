@@ -34,7 +34,15 @@ func NewMapWorker(workerAddr string, taskfile string, taskID int, totalPartition
 // 3. Save the intermediate files locally
 // 4. Send MapTaskComplete rpc request to coordinator
 func (m *MapWorker) ExecuteMap() {
-	intermediate := m.mapfunc(m.taskFile, "")
+	contentBytes, err := os.ReadFile(m.taskFile)
+	if err != nil {
+		fmt.Printf("Error reading file: %v\n", err)
+		return
+	}
+
+	fileContent := string(contentBytes)
+	intermediate := m.mapfunc(m.taskFile, fileContent)
+
 	// Sort before saving to disk
 	// cseweb.ucsd.edu/classes/sp16/cse291-e/applications/ln/lecture14.html
 	sort.Sort(ByKey(intermediate))
@@ -43,7 +51,7 @@ func (m *MapWorker) ExecuteMap() {
 
 	intermediateFiles := make([]string, m.totalPartition)
 	for i := range m.totalPartition {
-		filename := fmt.Sprintf("task-%d-part-%d", m.taskID, i)
+		filename := fmt.Sprintf("/tmp/task-%d-part-%d", m.taskID, i)
 		intermediateFiles[i] = filename
 	}
 
@@ -64,7 +72,7 @@ func (m *MapWorker) saveIntermediate(pairs []KeyValue, taskID int, nPartition in
 	intermediateFiles := make([]*os.File, nPartition)
 
 	for i := range nPartition {
-		filename := fmt.Sprintf("task-%d-part-%d", taskID, i)
+		filename := fmt.Sprintf("/tmp/task-%d-part-%d", taskID, i)
 
 		file, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 		if err != nil {

@@ -13,14 +13,15 @@ type ReduceWorker struct {
 	workerAddr      string
 	reduceID        int
 	reducef         ReduceFunc
+	taskID          int
 	outputLocations []MapOutputLocation
 	outputFiles     []string
 }
 
-func NewReduceWorker(workerAddr string, reduceID int, reducef ReduceFunc, outputLocations []MapOutputLocation) *ReduceWorker {
+func NewReduceWorker(workerAddr string, taskID int, reducef ReduceFunc, outputLocations []MapOutputLocation) *ReduceWorker {
 	return &ReduceWorker{
 		workerAddr:      workerAddr,
-		reduceID:        reduceID,
+		reduceID:        taskID,
 		reducef:         reducef,
 		outputLocations: outputLocations,
 	}
@@ -74,6 +75,20 @@ func (r *ReduceWorker) ExecuteReduce() {
 		result := r.reducef(currentKey, currentValues)
 		writer.WriteString(fmt.Sprintf("%s %v\n", currentKey, result))
 	}
+
+	args := &ReduceTaskReportArgs{
+		TaskID: r.reduceID,
+		Status: Completed,
+	}
+	reply := &ReduceTaskReportReply{}
+	ok := call("Coordinator.ReduceTaskReport", args, reply, coordinatorSock())
+	if !ok {
+		fmt.Println(ok)
+		fmt.Println()
+	}
+
+	fmt.Println("Reduced finished")
+
 }
 
 // save all intermediate files(specific to this partition) to our local disk
@@ -84,7 +99,7 @@ func (r *ReduceWorker) findFileForPartition(outputs []MapOutputLocation, reduceI
 	for _, output := range outputs {
 		filename := fmt.Sprintf("task-%d-part-%d", output.TaskID, output.PartID)
 		args := GetIntermediateFileArgs{
-			Filename: filename,
+			Filename: fmt.Sprintf("/tmp/%s", filename),
 		}
 		reply := GetIntermediateFileReply{}
 
@@ -115,6 +130,7 @@ func (r *ReduceWorker) findFileForPartition(outputs []MapOutputLocation, reduceI
 		r.outputFiles = append(r.outputFiles, tempFilePath)
 		tempFile.Close()
 	}
+
 }
 
 func (r *ReduceWorker) mergeSortIterator() <-chan KeyValue {
@@ -164,6 +180,11 @@ func (r *ReduceWorker) mergeSortIterator() <-chan KeyValue {
 				heap.Push(h, &ReduceSortItem{Key: key, Value: value, FileID: item.FileID})
 			}
 		}
+
+		if h.Len() == 0 {
+			return
+		}
+
 	}()
 
 	return ch

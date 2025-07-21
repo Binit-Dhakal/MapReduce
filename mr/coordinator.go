@@ -74,7 +74,14 @@ func NewCoordinator(files []string, nReduce int) *Coordinator {
 		})
 	}
 
+	for _, task := range c.Tasks {
+		fmt.Printf("Created task: %v\n", task)
+	}
+
 	c.server()
+
+	go c.checkHeartbeat()
+
 	return c
 }
 
@@ -91,6 +98,11 @@ func (c *Coordinator) AssignTask(args *AssignTaskArgs, reply *AssignTaskReply) e
 			reply.TaskFile = task.Input
 			reply.TaskType = task.Type
 			reply.PartitionCount = c.ReduceNum
+
+			fmt.Printf(
+				"Assigned task %d with file %v of type %v to %s\n",
+				task.ID, task.Input, task.Type, args.WorkerAddr,
+			)
 			return nil
 		}
 	}
@@ -105,30 +117,32 @@ func (c *Coordinator) AssignTask(args *AssignTaskArgs, reply *AssignTaskReply) e
 
 	// we assign reduce task if all map task is completed
 	if allMapsCompleted {
-		log.Println("All map tasks are complete. Assigning a reduce task.")
 		for _, task := range c.Tasks {
-			if task.Type == Reduce && task.State == Idle {
-				task.WorkerAddr = args.WorkerAddr
-				task.State = InProgress
-
-				outputLocations := make([]MapOutputLocation, 0)
-				for _, output := range c.IntermediateFiles {
-					address := c.Workers[output.WorkerAddr].Address
-					outputLocations = append(outputLocations, MapOutputLocation{
-						TaskID:        output.TaskID,
-						PartID:        task.ID,
-						WorkerAddress: address,
-					})
-				}
-
-				reply.TaskID = task.ID
-				reply.MapOutputLocations = outputLocations
-				reply.TaskType = task.Type
-				return nil
+			if task.Type != Reduce || task.State != Idle {
+				continue
 			}
+			task.WorkerAddr = args.WorkerAddr
+			task.State = InProgress
+
+			outputLocations := make([]MapOutputLocation, 0)
+			for _, output := range c.IntermediateFiles {
+				outputLocations = append(outputLocations, MapOutputLocation{
+					TaskID:        output.TaskID,
+					PartID:        task.ID,
+					WorkerAddress: output.WorkerAddr,
+				})
+			}
+
+			reply.TaskID = task.ID
+			reply.MapOutputLocations = outputLocations
+			reply.TaskType = task.Type
+
+			fmt.Printf("Assigned task %d with file %v of type %v to %s\n", task.ID, task.Input, task.Type, args.WorkerAddr)
+			return nil
 		}
 	}
 
+	// to indicate we have not assigned worker any task now
 	reply.TaskID = -1
 	return nil
 }
@@ -157,6 +171,7 @@ func (c *Coordinator) Done() bool {
 	for _, task := range c.Tasks {
 		if task.State != Completed {
 			allDone = false
+			break
 		}
 	}
 
@@ -167,13 +182,17 @@ func (c *Coordinator) MapTaskComplete(args *MapTaskCompleteArgs, reply *MapTaskC
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	task, err := c.GetTaskByID(args.TaskID)
-	if err != nil {
-		reply.Success = false
-		return err
+	notFound := true
+	for _, task := range c.Tasks {
+		if task.ID == args.TaskID && task.Type == Map {
+			task.State = Completed
+			notFound = false
+		}
 	}
-
-	task.State = Completed
+	if notFound {
+		reply.Success = false
+		return fmt.Errorf("Task not found")
+	}
 
 	c.IntermediateFiles = append(c.IntermediateFiles, &MapTaskOutput{
 		WorkerAddr: args.WorkerAddr,
@@ -181,25 +200,24 @@ func (c *Coordinator) MapTaskComplete(args *MapTaskCompleteArgs, reply *MapTaskC
 		Filenames:  args.IntermediateFiles,
 	})
 
-	log.Printf("Worker %d completed Map task %d", args.WorkerAddr, args.TaskID)
+	log.Printf("Worker %s completed Map task %d", args.WorkerAddr, args.TaskID)
 	reply.Success = true
 
 	return nil
 }
 
-func (c *Coordinator) GetTaskByID(id int) (*Task, error) {
-	for _, task := range c.Tasks {
-		if task.ID == id {
-			return task, nil
-		}
-	}
-
-	return nil, fmt.Errorf("Task not found")
-}
-
 func (c *Coordinator) ReportHeartbeat(args *ReportHeartbeatArgs, reply *ReportHeartbeatReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	fmt.Println("Heartbeat: ", args.WorkerAddr)
+	fmt.Println("Workers: ", c.Workers)
+
+	if _, exists := c.Workers[args.WorkerAddr]; !exists {
+		c.Workers[args.WorkerAddr] = &Worker{
+			Address: args.WorkerAddr,
+		}
+	}
 
 	c.Workers[args.WorkerAddr].LastSeen = time.Now()
 
@@ -208,22 +226,39 @@ func (c *Coordinator) ReportHeartbeat(args *ReportHeartbeatArgs, reply *ReportHe
 
 func (c *Coordinator) checkHeartbeat() {
 	for {
+		c.mu.Lock()
 		for workerAddr, worker := range c.Workers {
 			// failure of worker machine to send heartbeat
-			if worker.LastSeen.Add(6 * time.Second).After(time.Now()) {
-				c.makeAllTaskIdle(workerAddr)
+			if time.Since(worker.LastSeen) > 6*time.Second {
+				// convert all in-progress and completed task by workerAddr to idle
+				fmt.Printf("Deleting all task of worker %s\n\n", workerAddr)
+				for _, task := range c.Tasks {
+					if task.WorkerAddr == workerAddr {
+						task.State = Idle
+					}
+				}
 				delete(c.Workers, workerAddr)
 			}
 		}
-		time.Sleep(1)
+		c.mu.Unlock()
+		time.Sleep(2)
 	}
 }
 
-// convert all in-progress and completed task by workerAddr to idle
-func (c *Coordinator) makeAllTaskIdle(workerAddr string) {
-	for _, task := range c.Tasks {
-		if task.WorkerAddr == workerAddr {
-			task.State = Idle
+func (c *Coordinator) ReduceTaskReport(args *ReduceTaskReportArgs, reply *ReduceTaskReportReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	fmt.Printf("Reduce Task completed: %+v", args)
+	if args.Status == Completed {
+		for _, task := range c.Tasks {
+			if task.Type == Reduce && task.ID == args.TaskID {
+				task.State = Completed
+				fmt.Printf("Reduce Task completed: %+v", task)
+			}
 		}
 	}
+
+	reply.Success = true
+	return nil
 }
