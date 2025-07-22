@@ -61,6 +61,7 @@ func NewWorker(mapf MapFunc, reducef ReduceFunc) {
 
 			switch assignReply.TaskType {
 			case Map:
+				time.Sleep(1 * time.Second)
 
 				mapWorker := NewMapWorker(
 					assignReply.TaskFile, taskID, partitionCount, mapf,
@@ -83,13 +84,14 @@ func NewWorker(mapf MapFunc, reducef ReduceFunc) {
 
 			case Reduce:
 				reduceWorker := NewReduceWorker(
-					assignReply.TaskID, assignReply.ReduceID, reducef, assignReply.MapOutputLocations,
+					assignReply.TaskID, assignReply.ReduceID, reducef,
 				)
 				args := &ReportReduceStatusArgs{
 					TaskID: taskID,
 					Status: Completed,
 				}
 				reply := &ReportMapStatusReply{}
+				time.Sleep(2 * time.Second)
 
 				err := reduceWorker.ExecuteReduce()
 				if err != nil {

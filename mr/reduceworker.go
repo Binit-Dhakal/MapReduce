@@ -7,22 +7,22 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 type ReduceWorker struct {
-	reduceID        int
-	reducef         ReduceFunc
-	taskID          int
-	outputLocations map[string][]string
-	outputFiles     []string
+	reduceID    int
+	reducef     ReduceFunc
+	taskID      int
+	outputFiles []string
 }
 
-func NewReduceWorker(taskID int, reduceID int, reducef ReduceFunc, outputLocations map[string][]string) *ReduceWorker {
+func NewReduceWorker(taskID int, reduceID int, reducef ReduceFunc) *ReduceWorker {
 	return &ReduceWorker{
-		taskID:          taskID,
-		reduceID:        reduceID,
-		reducef:         reducef,
-		outputLocations: outputLocations,
+		taskID:      taskID,
+		reduceID:    reduceID,
+		reducef:     reducef,
+		outputFiles: make([]string, 0),
 	}
 }
 
@@ -31,7 +31,7 @@ func NewReduceWorker(taskID int, reduceID int, reducef ReduceFunc, outputLocatio
 // 3. Group all intermediate keys together
 // 4. call reduce function
 func (r *ReduceWorker) ExecuteReduce() error {
-	r.findFileForPartition(r.outputLocations, r.reduceID)
+	r.findFileForPartition(r.reduceID)
 
 	finalFile, err := os.OpenFile(
 		fmt.Sprintf("reducer_%d", r.reduceID),
@@ -79,47 +79,85 @@ func (r *ReduceWorker) ExecuteReduce() error {
 }
 
 // save all intermediate files(specific to this partition) to our local disk
-func (r *ReduceWorker) findFileForPartition(outputs map[string][]string, reduceID int) {
+func (r *ReduceWorker) findFileForPartition(reduceID int) {
 	tempDir := fmt.Sprintf("/tmp/mr_reducer_%d/", reduceID)
 	os.MkdirAll(tempDir, 0755)
 
-	for address, filenames := range outputs {
-		for _, filename := range filenames {
-			args := GetIntermediateFileArgs{
-				Filename: filename,
-			}
-			reply := GetIntermediateFileReply{}
+	visitedFiles := make(map[string]struct{})
 
-			ok := call(
-				"Worker.GetIntermediateFile",
-				&args,
-				&reply,
-				address,
-			)
-			// TODO: inform coordinator that we couldn't connect with the worker so coordinator
-			// can mark the worker as failed
-			if !ok {
-				log.Printf("Worker %s is not responding to get file %s", address, filename)
-				continue
-			}
+	totalCount := 0
+	curCount := 0
+	for {
+		wasFailure := false
+		fmt.Println("Pinging for new data")
 
-			filename = filepath.Base(filename)
-			tempFilePath := filepath.Join(tempDir, filename)
-			tempFile, err := os.Create(tempFilePath)
-			if err != nil {
-				log.Fatalf("Failed to create temp file: %v", err)
-			}
+		getLocationsArgs := GetReduceInputLocationArgs{PartitionID: reduceID}
+		getLocationsReply := GetReduceInputLocationReply{}
 
-			_, err = tempFile.Write(reply.Content)
-			if err != nil {
-				log.Fatalf("Failed to write to temp file: %v", err)
-			}
+		ok := call("Coordinator.GetReduceInputLocation", &getLocationsArgs, &getLocationsReply, coordinatorSock())
+		if !ok {
+			log.Printf("Failed to get updated map output location from coordinator.")
+			time.Sleep(time.Second)
+			continue
+		}
 
-			r.outputFiles = append(r.outputFiles, tempFilePath)
-			tempFile.Close()
+		totalCount = getLocationsReply.TotalFiles
+
+		for address, filenames := range getLocationsReply.Locations {
+			for _, filename := range filenames {
+				if _, ok := visitedFiles[filename]; ok {
+					continue
+				}
+
+				args := GetIntermediateFileArgs{
+					Filename: filename,
+				}
+				reply := GetIntermediateFileReply{}
+
+				ok := call(
+					"Worker.GetIntermediateFile",
+					&args,
+					&reply,
+					address,
+				)
+				// TODO: inform coordinator that we couldn't connect with the worker so coordinator
+				// can mark the worker as failed
+				if !ok {
+					wasFailure = true
+					log.Printf("Worker %s is not responding to get file %s", address, filename)
+
+					reportArgs := ReportFileInaccessibleArgs{WorkerAddress: address}
+					reportReply := ReportFileInaccessibleReply{}
+
+					call("Coordinator.ReportFileInaccessible", reportArgs, reportReply, coordinatorSock())
+					break
+				}
+
+				visitedFiles[filename] = struct{}{}
+				curCount++
+
+				filename = filepath.Base(filename)
+				tempFilePath := filepath.Join(tempDir, filename)
+				tempFile, err := os.Create(tempFilePath)
+				if err != nil {
+					log.Fatalf("Failed to create temp file: %v", err)
+				}
+
+				_, err = tempFile.Write(reply.Content)
+				if err != nil {
+					log.Fatalf("Failed to write to temp file: %v", err)
+				}
+
+				r.outputFiles = append(r.outputFiles, tempFilePath)
+				tempFile.Close()
+			}
+		}
+		if wasFailure || (curCount < totalCount) {
+			time.Sleep(time.Second)
+		} else {
+			break
 		}
 	}
-
 }
 
 func (r *ReduceWorker) mergeSortIterator() <-chan KeyValue {

@@ -13,15 +13,14 @@ type AssignTaskArgs struct {
 }
 
 type AssignTaskReply struct {
-	TaskID             int
-	TaskType           TaskType
-	TaskFile           string              // map
-	PartitionCount     int                 // map
-	ReduceID           int                 // reduce
-	MapOutputLocations map[string][]string // reduce
+	TaskID         int
+	TaskType       TaskType
+	TaskFile       string // map
+	PartitionCount int    // map
+	ReduceID       int    // reduce
 }
 
-// MapTaskComplete
+// ReportMapStatus
 type ReportMapStatusArgs struct {
 	WorkerAddr        string
 	TaskID            int
@@ -33,7 +32,7 @@ type ReportMapStatusArgs struct {
 type ReportMapStatusReply struct {
 }
 
-// ReduceTaskComplete
+// ReportReduceStatus
 type ReportReduceStatusArgs struct {
 	TaskID int
 	Status Status
@@ -65,6 +64,24 @@ type ShutdownWorkerArgs struct {
 }
 
 type ShutdownWorkerReply struct {
+}
+
+// GetReduceInputLocation
+type GetReduceInputLocationArgs struct {
+	PartitionID int
+}
+
+type GetReduceInputLocationReply struct {
+	Locations  map[string][]string
+	TotalFiles int
+}
+
+// ReportIFileInaccessible
+type ReportFileInaccessibleArgs struct {
+	WorkerAddress string
+}
+
+type ReportFileInaccessibleReply struct {
 }
 
 func coordinatorSock() string {

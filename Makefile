@@ -4,7 +4,7 @@ build-plugin:
 	cd countmr && go build -buildmode=plugin -o ../build/
 
 clean:
-	rm -f mr-out-*
+	rm -f  reducer_*
 
 run-coordinator: 
 	go run coordinator/coordinator.go txt/pg-*.txt

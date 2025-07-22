@@ -157,7 +157,8 @@ func (c *Coordinator) AssignTask(args *AssignTaskArgs, reply *AssignTaskReply) e
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	fmt.Println(c.NumFinishMapTask, c.nFile)
+	fmt.Println(c.nFile, c.NumFinishMapTask)
+
 	if c.NumFinishMapTask < c.nFile {
 		select {
 		case task := <-c.mapTaskChan:
@@ -189,17 +190,7 @@ func (c *Coordinator) AssignTask(args *AssignTaskArgs, reply *AssignTaskReply) e
 			reply.TaskID = task.ID
 			reply.TaskType = task.Type
 			reply.ReduceID = task.ReduceID
-			outputLocations := make(map[string][]string, 0)
-			for address, filenames := range c.IntermediateFiles {
-				for _, filename := range filenames {
-					pattern := fmt.Sprintf("/tmp/mr_map/%d/", task.ReduceID)
-					if strings.Contains(filename, pattern) {
-						outputLocations[address] = append(outputLocations[address], filename)
-					}
-				}
-			}
 
-			reply.MapOutputLocations = outputLocations
 			fmt.Printf(
 				"Assigned task %d with file %v of type %v to %s\n",
 				task.ID, task.Input, task.Type, args.WorkerAddr,
@@ -213,6 +204,50 @@ func (c *Coordinator) AssignTask(args *AssignTaskArgs, reply *AssignTaskReply) e
 
 	// to indicate we have not assigned worker any task now
 	reply.TaskID = -1
+	return nil
+}
+
+func (c *Coordinator) GetReduceInputLocation(args *GetReduceInputLocationArgs, reply *GetReduceInputLocationReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	outputLocations := make(map[string][]string, 0)
+	for address, filenames := range c.IntermediateFiles {
+		for _, filename := range filenames {
+			pattern := fmt.Sprintf("/tmp/mr_map/%d/", args.PartitionID)
+			if strings.Contains(filename, pattern) {
+				outputLocations[address] = append(outputLocations[address], filename)
+			}
+		}
+	}
+
+	reply.Locations = outputLocations
+	reply.TotalFiles = c.nFile
+	return nil
+}
+
+func (c *Coordinator) ReportFileInaccessible(args *ReportFileInaccessibleArgs, reply *ReportFileInaccessibleReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	fmt.Printf("Worker Inaccessible: %v", args.WorkerAddress)
+
+	for _, task := range c.Tasks {
+		if task.WorkerAddr == args.WorkerAddress {
+			if task.State == Completed {
+				c.NumFinishMapTask--
+			}
+			fmt.Printf("Task change to idle: %+v\n", task)
+			task.WorkerAddr = ""
+			task.State = Idle
+			c.mapTaskChan <- task
+
+			fmt.Printf("Task added to map channel: %+v\n", task)
+		}
+	}
+
+	delete(c.Workers, args.WorkerAddress)
+	delete(c.IntermediateFiles, args.WorkerAddress)
+
 	return nil
 }
 
@@ -235,6 +270,7 @@ func (c *Coordinator) checkHeartbeat(ctx context.Context) {
 								c.NumFinishMapTask--
 							}
 							task.State = Idle
+							task.WorkerAddr = ""
 							c.mapTaskChan <- task
 						}
 					}
