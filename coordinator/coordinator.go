@@ -9,6 +9,12 @@ import (
 )
 
 func main() {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "Coordinator panic: %v\n", r)
+		}
+	}()
+
 	if len(os.Args) < 2 {
 		fmt.Fprintf(os.Stderr, "Usage: coordinator.go ...inputfiles")
 	}

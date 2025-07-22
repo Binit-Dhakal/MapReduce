@@ -3,29 +3,23 @@ package mr
 import (
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"sort"
 )
 
 type MapWorker struct {
-	taskFile            string
-	taskID              int
-	totalPartition      int
-	workerAddr          string
-	mapfunc             MapFunc
-	coordinatorSockName string
+	taskFile       string
+	taskID         int
+	totalPartition int
+	mapfunc        MapFunc
 }
 
-func NewMapWorker(workerAddr string, taskfile string, taskID int, totalPartition int, mapper MapFunc) *MapWorker {
-	coordinatorSockName := coordinatorSock()
+func NewMapWorker(taskfile string, taskID int, totalPartition int, mapper MapFunc) *MapWorker {
 	return &MapWorker{
-		taskFile:            taskfile,
-		taskID:              taskID,
-		totalPartition:      totalPartition,
-		workerAddr:          workerAddr,
-		mapfunc:             mapper,
-		coordinatorSockName: coordinatorSockName,
+		taskFile:       taskfile,
+		taskID:         taskID,
+		totalPartition: totalPartition,
+		mapfunc:        mapper,
 	}
 }
 
@@ -33,11 +27,10 @@ func NewMapWorker(workerAddr string, taskfile string, taskID int, totalPartition
 // 2. Sort the intermediate key-value before saving
 // 3. Save the intermediate files locally
 // 4. Send MapTaskComplete rpc request to coordinator
-func (m *MapWorker) ExecuteMap() {
+func (m *MapWorker) ExecuteMap() ([]string, error) {
 	contentBytes, err := os.ReadFile(m.taskFile)
 	if err != nil {
-		fmt.Printf("Error reading file: %v\n", err)
-		return
+		return nil, fmt.Errorf("Error reading file: %v\n", err)
 	}
 
 	fileContent := string(contentBytes)
@@ -47,7 +40,10 @@ func (m *MapWorker) ExecuteMap() {
 	// cseweb.ucsd.edu/classes/sp16/cse291-e/applications/ln/lecture14.html
 	sort.Sort(ByKey(intermediate))
 
-	m.saveIntermediate(intermediate, m.taskID, m.totalPartition)
+	err = m.saveIntermediate(intermediate, m.taskID, m.totalPartition)
+	if err != nil {
+		return nil, err
+	}
 
 	intermediateFiles := make([]string, m.totalPartition)
 	for i := range m.totalPartition {
@@ -55,20 +51,10 @@ func (m *MapWorker) ExecuteMap() {
 		intermediateFiles[i] = filename
 	}
 
-	completeArgs := &MapTaskCompleteArgs{
-		WorkerAddr:        m.workerAddr,
-		TaskID:            m.taskID,
-		IntermediateFiles: intermediateFiles,
-	}
-	completeReply := &MapTaskCompleteReply{}
-
-	call("Coordinator.MapTaskComplete", completeArgs, completeReply, m.coordinatorSockName)
-	if !completeReply.Success {
-		log.Println("MapTaskComplete Error")
-	}
+	return intermediateFiles, nil
 }
 
-func (m *MapWorker) saveIntermediate(pairs []KeyValue, taskID int, nPartition int) {
+func (m *MapWorker) saveIntermediate(pairs []KeyValue, taskID int, nPartition int) error {
 	intermediateFiles := make([]*os.File, nPartition)
 
 	for i := range nPartition {
@@ -76,7 +62,7 @@ func (m *MapWorker) saveIntermediate(pairs []KeyValue, taskID int, nPartition in
 
 		file, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 		if err != nil {
-			log.Fatalf("Failed to open intermediate file: %v", file)
+			return fmt.Errorf("Failed to open intermediate file: %v", file)
 		}
 		intermediateFiles[i] = file
 	}
@@ -94,9 +80,11 @@ func (m *MapWorker) saveIntermediate(pairs []KeyValue, taskID int, nPartition in
 
 		_, err := fmt.Fprintf(intermediateFiles[partition], "%s %s\n", pair.Key, pair.Value)
 		if err != nil {
-			log.Fatalf("Failed to write to intermediate file: %v", err)
+			return fmt.Errorf("Failed to write to intermediate file: %v", err)
 		}
 	}
+
+	return nil
 }
 
 // RPC function to get intermediate file (from reduceWorker to mapWorker)

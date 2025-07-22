@@ -61,16 +61,41 @@ func NewWorker(mapf MapFunc, reducef ReduceFunc) {
 			switch assignReply.TaskType {
 			case Map:
 				mapWorker := NewMapWorker(
-					sockname, assignReply.TaskFile, taskID, partitionCount, mapf,
+					assignReply.TaskFile, taskID, partitionCount, mapf,
 				)
-				mapWorker.ExecuteMap()
+				args := &ReportMapStatusArgs{
+					WorkerAddr: sockname,
+					TaskID:     taskID,
+					Status:     Completed,
+				}
+
+				reply := &ReportMapStatusReply{}
+				intermediateFiles, err := mapWorker.ExecuteMap()
+				if err != nil {
+					args.Status = Failed
+					args.Error = err.Error()
+				} else {
+					args.IntermediateFiles = intermediateFiles
+				}
+				call("Coordinator.ReportMapStatus", args, reply, coordinatorSockName)
 
 			case Reduce:
 				reduceWorker := NewReduceWorker(
-					sockname, assignReply.TaskID, reducef, assignReply.MapOutputLocations,
+					assignReply.TaskID, assignReply.ReduceID, reducef, assignReply.MapOutputLocations,
 				)
-				reduceWorker.ExecuteReduce()
+				args := &ReportReduceStatusArgs{
+					TaskID: taskID,
+					Status: Completed,
+				}
+				reply := &ReportMapStatusReply{}
 
+				err := reduceWorker.ExecuteReduce()
+				if err != nil {
+					args.Status = Failed
+					args.Error = err.Error()
+				}
+
+				call("Coordinator.ReportReduceStatus", args, reply, coordinatorSock())
 			}
 		}
 	}
@@ -94,12 +119,14 @@ func (w *Worker) startWorkerServer() string {
 func (w *Worker) pingCoordinator(ctx context.Context) {
 	coordinatorSockName := coordinatorSock()
 
-	ticker := time.NewTicker(2 * time.Second)
 	args := &ReportHeartbeatArgs{
 		WorkerAddr: w.Address,
 	}
 	reply := &ReportHeartbeatReply{}
 
+	call("Coordinator.ReportHeartbeat", args, reply, coordinatorSockName)
+
+	ticker := time.NewTicker(2 * time.Second)
 	for {
 		select {
 		case <-ticker.C:

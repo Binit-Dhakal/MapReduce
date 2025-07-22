@@ -20,31 +20,33 @@ type AssignTaskArgs struct {
 
 type AssignTaskReply struct {
 	TaskID             int
-	TaskFile           string // map
 	TaskType           TaskType
+	TaskFile           string              // map
 	PartitionCount     int                 // map
+	ReduceID           int                 // reduce
 	MapOutputLocations []MapOutputLocation // reduce
 }
 
 // MapTaskComplete
-type MapTaskCompleteArgs struct {
+type ReportMapStatusArgs struct {
 	WorkerAddr        string
 	TaskID            int
 	IntermediateFiles []string
+	Status            Status
+	Error             string
 }
 
-type MapTaskCompleteReply struct {
-	Success bool
+type ReportMapStatusReply struct {
 }
 
 // ReduceTaskComplete
-type ReduceTaskReportArgs struct {
+type ReportReduceStatusArgs struct {
 	TaskID int
 	Status Status
+	Error  string
 }
 
-type ReduceTaskReportReply struct {
-	Success bool
+type ReportReduceStatusReply struct {
 }
 
 // GetIntermediateFiles
@@ -82,7 +84,8 @@ func workerSock() string {
 func call(rpcname string, args any, reply any, sockname string) bool {
 	c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
-		log.Fatal("dialing: ", err)
+		log.Printf("dialing: %v", err)
+		return false
 	}
 	defer c.Close()
 

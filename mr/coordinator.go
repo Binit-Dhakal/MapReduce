@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -18,6 +19,7 @@ const (
 	Idle Status = iota
 	InProgress
 	Completed
+	Failed
 )
 
 const (
@@ -28,9 +30,11 @@ const (
 type Task struct {
 	ID         int
 	Type       TaskType
-	Input      string
 	State      Status
 	WorkerAddr string // for non-idle task
+
+	Input    string // map
+	ReduceID int    // reduce
 }
 
 type MapTaskOutput struct {
@@ -40,38 +44,62 @@ type MapTaskOutput struct {
 }
 
 type Coordinator struct {
-	Tasks             []*Task            // all tasks
+	Tasks             map[int]*Task      // all tasks
 	IntermediateFiles []*MapTaskOutput   // all results from map
 	Workers           map[string]*Worker // active workers
-	ReduceNum         int
-	mu                sync.Mutex
+
+	// to check which phase our program is in: Map or Reduce phase
+	NumFinishMapTask    int
+	NumFinishReduceTask int
+	nReduce             int
+	nFile               int
+
+	mapTaskChan    chan *Task
+	reduceTaskChan chan *Task
+	cancel         context.CancelFunc
+	mu             sync.Mutex
 }
 
 func NewCoordinator(files []string, nReduce int) *Coordinator {
+	ctx, cancel := context.WithCancel(context.Background())
+
 	c := &Coordinator{
-		Tasks:             make([]*Task, 0),
+		Tasks:             make(map[int]*Task, 0),
 		IntermediateFiles: make([]*MapTaskOutput, 0),
 		Workers:           map[string]*Worker{},
-		ReduceNum:         nReduce,
+
+		NumFinishMapTask:    0,
+		NumFinishReduceTask: 0,
+		nReduce:             nReduce,
+		nFile:               len(files),
+
+		mapTaskChan:    make(chan *Task, len(files)),
+		reduceTaskChan: make(chan *Task, nReduce),
+		cancel:         cancel,
 	}
 
 	// map tasks
 	for i, file := range files {
-		c.Tasks = append(c.Tasks, &Task{
+		task := &Task{
 			ID:    i,
 			Type:  Map,
 			Input: file,
 			State: Idle,
-		})
+		}
+		c.Tasks[task.ID] = task
+		c.mapTaskChan <- task
 	}
 
 	// reduce tasks
 	for i := range nReduce {
-		c.Tasks = append(c.Tasks, &Task{
-			ID:    i,
-			Type:  Reduce,
-			State: Idle,
-		})
+		task := &Task{
+			ID:       len(files) + i,
+			Type:     Reduce,
+			State:    Idle,
+			ReduceID: i,
+		}
+		c.Tasks[task.ID] = task
+		c.reduceTaskChan <- task
 	}
 
 	for _, task := range c.Tasks {
@@ -80,7 +108,7 @@ func NewCoordinator(files []string, nReduce int) *Coordinator {
 
 	c.server()
 
-	go c.checkHeartbeat()
+	go c.checkHeartbeat(ctx)
 
 	return c
 }
@@ -89,55 +117,49 @@ func (c *Coordinator) AssignTask(args *AssignTaskArgs, reply *AssignTaskReply) e
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	for _, task := range c.Tasks {
-		if task.Type == Map && task.State == Idle {
-			task.WorkerAddr = args.WorkerAddr
+	if c.NumFinishMapTask < c.nFile {
+		select {
+		case task := <-c.mapTaskChan:
 			task.State = InProgress
+			task.WorkerAddr = args.WorkerAddr
 
 			reply.TaskID = task.ID
 			reply.TaskFile = task.Input
 			reply.TaskType = task.Type
-			reply.PartitionCount = c.ReduceNum
+			reply.PartitionCount = c.nReduce
 
 			fmt.Printf(
 				"Assigned task %d with file %v of type %v to %s\n",
 				task.ID, task.Input, task.Type, args.WorkerAddr,
 			)
 			return nil
+		default:
+			reply.TaskID = -1 // no map task left to assign for now
+			return nil
 		}
 	}
 
-	allMapsCompleted := true
-	for _, task := range c.Tasks {
-		if task.Type == Map && task.State != Completed {
-			allMapsCompleted = false
-			break
-		}
-	}
-
-	// we assign reduce task if all map task is completed
-	if allMapsCompleted {
-		for _, task := range c.Tasks {
-			if task.Type != Reduce || task.State != Idle {
-				continue
-			}
-			task.WorkerAddr = args.WorkerAddr
+	if c.NumFinishReduceTask < c.nReduce {
+		select {
+		case task := <-c.reduceTaskChan:
 			task.State = InProgress
+			task.WorkerAddr = args.WorkerAddr
 
+			reply.TaskID = task.ID
+			reply.TaskType = task.Type
+			reply.ReduceID = task.ReduceID
 			outputLocations := make([]MapOutputLocation, 0)
 			for _, output := range c.IntermediateFiles {
 				outputLocations = append(outputLocations, MapOutputLocation{
 					TaskID:        output.TaskID,
-					PartID:        task.ID,
+					PartID:        task.ReduceID,
 					WorkerAddress: output.WorkerAddr,
 				})
 			}
-
-			reply.TaskID = task.ID
 			reply.MapOutputLocations = outputLocations
-			reply.TaskType = task.Type
-
-			fmt.Printf("Assigned task %d with file %v of type %v to %s\n", task.ID, task.Input, task.Type, args.WorkerAddr)
+			return nil
+		default:
+			reply.TaskID = -1 // no reduce task left to assign for now
 			return nil
 		}
 	}
@@ -177,7 +199,7 @@ func (c *Coordinator) Done() bool {
 
 	if allDone {
 		args := &ShutdownWorkerArgs{}
-		for workerAddr, _ := range c.Workers {
+		for workerAddr := range c.Workers {
 			reply := &ShutdownWorkerReply{}
 			call("Worker.ShutdownWorker", args, reply, workerAddr)
 		}
@@ -186,21 +208,23 @@ func (c *Coordinator) Done() bool {
 	return allDone
 }
 
-func (c *Coordinator) MapTaskComplete(args *MapTaskCompleteArgs, reply *MapTaskCompleteReply) error {
+func (c *Coordinator) ReportMapStatus(args *ReportMapStatusArgs, reply *ReportMapStatusReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	notFound := true
-	for _, task := range c.Tasks {
-		if task.ID == args.TaskID && task.Type == Map {
-			task.State = Completed
-			notFound = false
-		}
-	}
-	if notFound {
-		reply.Success = false
+	task, ok := c.Tasks[args.TaskID]
+	if !ok {
 		return fmt.Errorf("Task not found")
 	}
+
+	if task.State == Failed {
+		task.State = Idle
+		c.mapTaskChan <- task
+		fmt.Println(args.Error)
+		return nil
+	}
+
+	task.State = Completed
 
 	c.IntermediateFiles = append(c.IntermediateFiles, &MapTaskOutput{
 		WorkerAddr: args.WorkerAddr,
@@ -208,8 +232,7 @@ func (c *Coordinator) MapTaskComplete(args *MapTaskCompleteArgs, reply *MapTaskC
 		Filenames:  args.IntermediateFiles,
 	})
 
-	log.Printf("Worker %s completed Map task %d", args.WorkerAddr, args.TaskID)
-	reply.Success = true
+	c.NumFinishMapTask++
 
 	return nil
 }
@@ -230,41 +253,53 @@ func (c *Coordinator) ReportHeartbeat(args *ReportHeartbeatArgs, reply *ReportHe
 	return nil
 }
 
-func (c *Coordinator) checkHeartbeat() {
+func (c *Coordinator) checkHeartbeat(ctx context.Context) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
 	for {
-		c.mu.Lock()
-		for workerAddr, worker := range c.Workers {
-			// failure of worker machine to send heartbeat
-			if time.Since(worker.LastSeen) > 6*time.Second {
-				// convert all in-progress and completed task by workerAddr to idle
-				fmt.Printf("Deleting all task of worker %s\n\n", workerAddr)
-				for _, task := range c.Tasks {
-					if task.WorkerAddr == workerAddr {
-						task.State = Idle
+		select {
+		case <-ticker.C:
+			c.mu.Lock()
+			for workerAddr, worker := range c.Workers {
+				// failure of worker machine to send heartbeat
+				if time.Since(worker.LastSeen) > 6*time.Second {
+					// convert all in-progress and completed task by workerAddr to idle
+					fmt.Printf("Worker not responding so deleting all task of worker %s\n\n", workerAddr)
+					for _, task := range c.Tasks {
+						if task.WorkerAddr == workerAddr {
+							task.State = Idle
+							c.mapTaskChan <- task
+						}
 					}
+					delete(c.Workers, workerAddr)
 				}
-				delete(c.Workers, workerAddr)
 			}
+			c.mu.Unlock()
+		case <-ctx.Done():
+			break
 		}
-		c.mu.Unlock()
-		time.Sleep(2)
 	}
 }
 
-func (c *Coordinator) ReduceTaskReport(args *ReduceTaskReportArgs, reply *ReduceTaskReportReply) error {
+func (c *Coordinator) ReportReduceStatus(args *ReportReduceStatusArgs, reply *ReportReduceStatusReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	fmt.Printf("Reduce Task completed: %+v", args)
-	if args.Status == Completed {
-		for _, task := range c.Tasks {
-			if task.Type == Reduce && task.ID == args.TaskID {
-				task.State = Completed
-				fmt.Printf("Reduce Task completed: %+v", task)
-			}
-		}
+	task, ok := c.Tasks[args.TaskID]
+	if !ok {
+		return fmt.Errorf("Task not found")
 	}
 
-	reply.Success = true
+	if args.Status == Failed {
+		task.State = Idle
+		c.reduceTaskChan <- task
+		return nil
+	}
+
+	task.State = Completed
+
+	c.NumFinishReduceTask++
+
 	return nil
 }

@@ -10,7 +10,6 @@ import (
 )
 
 type ReduceWorker struct {
-	workerAddr      string
 	reduceID        int
 	reducef         ReduceFunc
 	taskID          int
@@ -18,10 +17,10 @@ type ReduceWorker struct {
 	outputFiles     []string
 }
 
-func NewReduceWorker(workerAddr string, taskID int, reducef ReduceFunc, outputLocations []MapOutputLocation) *ReduceWorker {
+func NewReduceWorker(taskID int, reduceID int, reducef ReduceFunc, outputLocations []MapOutputLocation) *ReduceWorker {
 	return &ReduceWorker{
-		workerAddr:      workerAddr,
-		reduceID:        taskID,
+		taskID:          taskID,
+		reduceID:        reduceID,
 		reducef:         reducef,
 		outputLocations: outputLocations,
 	}
@@ -31,7 +30,7 @@ func NewReduceWorker(workerAddr string, taskID int, reducef ReduceFunc, outputLo
 // 2. Sort all intermediate files(external sort in disk)-not loading everything in memory
 // 3. Group all intermediate keys together
 // 4. call reduce function
-func (r *ReduceWorker) ExecuteReduce() {
+func (r *ReduceWorker) ExecuteReduce() error {
 	r.findFileForPartition(r.outputLocations, r.reduceID)
 
 	finalFile, err := os.OpenFile(
@@ -40,7 +39,7 @@ func (r *ReduceWorker) ExecuteReduce() {
 		0644,
 	)
 	if err != nil {
-		log.Fatalf("%v", err)
+		return err
 	}
 
 	defer finalFile.Close()
@@ -76,19 +75,7 @@ func (r *ReduceWorker) ExecuteReduce() {
 		writer.WriteString(fmt.Sprintf("%s %v\n", currentKey, result))
 	}
 
-	args := &ReduceTaskReportArgs{
-		TaskID: r.reduceID,
-		Status: Completed,
-	}
-	reply := &ReduceTaskReportReply{}
-	ok := call("Coordinator.ReduceTaskReport", args, reply, coordinatorSock())
-	if !ok {
-		fmt.Println(ok)
-		fmt.Println()
-	}
-
-	fmt.Println("Reduced finished")
-
+	return nil
 }
 
 // save all intermediate files(specific to this partition) to our local disk
