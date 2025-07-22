@@ -8,12 +8,6 @@ import (
 )
 
 // AssignTask
-type MapOutputLocation struct {
-	TaskID        int
-	PartID        int
-	WorkerAddress string
-}
-
 type AssignTaskArgs struct {
 	WorkerAddr string
 }
@@ -24,7 +18,7 @@ type AssignTaskReply struct {
 	TaskFile           string              // map
 	PartitionCount     int                 // map
 	ReduceID           int                 // reduce
-	MapOutputLocations []MapOutputLocation // reduce
+	MapOutputLocations map[string][]string // reduce
 }
 
 // MapTaskComplete

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -44,9 +45,9 @@ type MapTaskOutput struct {
 }
 
 type Coordinator struct {
-	Tasks             map[int]*Task      // all tasks
-	IntermediateFiles []*MapTaskOutput   // all results from map
-	Workers           map[string]*Worker // active workers
+	Tasks             map[int]*Task       // all tasks
+	IntermediateFiles map[string][]string // all results from map
+	Workers           map[string]*Worker  // active workers
 
 	// to check which phase our program is in: Map or Reduce phase
 	NumFinishMapTask    int
@@ -64,8 +65,8 @@ func NewCoordinator(files []string, nReduce int) *Coordinator {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	c := &Coordinator{
-		Tasks:             make(map[int]*Task, 0),
-		IntermediateFiles: make([]*MapTaskOutput, 0),
+		Tasks:             map[int]*Task{},
+		IntermediateFiles: map[string][]string{},
 		Workers:           map[string]*Worker{},
 
 		NumFinishMapTask:    0,
@@ -113,62 +114,6 @@ func NewCoordinator(files []string, nReduce int) *Coordinator {
 	return c
 }
 
-func (c *Coordinator) AssignTask(args *AssignTaskArgs, reply *AssignTaskReply) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.NumFinishMapTask < c.nFile {
-		select {
-		case task := <-c.mapTaskChan:
-			task.State = InProgress
-			task.WorkerAddr = args.WorkerAddr
-
-			reply.TaskID = task.ID
-			reply.TaskFile = task.Input
-			reply.TaskType = task.Type
-			reply.PartitionCount = c.nReduce
-
-			fmt.Printf(
-				"Assigned task %d with file %v of type %v to %s\n",
-				task.ID, task.Input, task.Type, args.WorkerAddr,
-			)
-			return nil
-		default:
-			reply.TaskID = -1 // no map task left to assign for now
-			return nil
-		}
-	}
-
-	if c.NumFinishReduceTask < c.nReduce {
-		select {
-		case task := <-c.reduceTaskChan:
-			task.State = InProgress
-			task.WorkerAddr = args.WorkerAddr
-
-			reply.TaskID = task.ID
-			reply.TaskType = task.Type
-			reply.ReduceID = task.ReduceID
-			outputLocations := make([]MapOutputLocation, 0)
-			for _, output := range c.IntermediateFiles {
-				outputLocations = append(outputLocations, MapOutputLocation{
-					TaskID:        output.TaskID,
-					PartID:        task.ReduceID,
-					WorkerAddress: output.WorkerAddr,
-				})
-			}
-			reply.MapOutputLocations = outputLocations
-			return nil
-		default:
-			reply.TaskID = -1 // no reduce task left to assign for now
-			return nil
-		}
-	}
-
-	// to indicate we have not assigned worker any task now
-	reply.TaskID = -1
-	return nil
-}
-
 func (c *Coordinator) server() {
 	rpc.Register(c)
 	rpc.HandleHTTP()
@@ -208,48 +153,66 @@ func (c *Coordinator) Done() bool {
 	return allDone
 }
 
-func (c *Coordinator) ReportMapStatus(args *ReportMapStatusArgs, reply *ReportMapStatusReply) error {
+func (c *Coordinator) AssignTask(args *AssignTaskArgs, reply *AssignTaskReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	task, ok := c.Tasks[args.TaskID]
-	if !ok {
-		return fmt.Errorf("Task not found")
-	}
+	fmt.Println(c.NumFinishMapTask, c.nFile)
+	if c.NumFinishMapTask < c.nFile {
+		select {
+		case task := <-c.mapTaskChan:
+			task.State = InProgress
+			task.WorkerAddr = args.WorkerAddr
 
-	if task.State == Failed {
-		task.State = Idle
-		c.mapTaskChan <- task
-		fmt.Println(args.Error)
-		return nil
-	}
+			reply.TaskID = task.ID
+			reply.TaskFile = task.Input
+			reply.TaskType = task.Type
+			reply.PartitionCount = c.nReduce
 
-	task.State = Completed
-
-	c.IntermediateFiles = append(c.IntermediateFiles, &MapTaskOutput{
-		WorkerAddr: args.WorkerAddr,
-		TaskID:     args.TaskID,
-		Filenames:  args.IntermediateFiles,
-	})
-
-	c.NumFinishMapTask++
-
-	return nil
-}
-
-func (c *Coordinator) ReportHeartbeat(args *ReportHeartbeatArgs, reply *ReportHeartbeatReply) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	fmt.Println("Heartbeat: ", args.WorkerAddr)
-	if _, exists := c.Workers[args.WorkerAddr]; !exists {
-		c.Workers[args.WorkerAddr] = &Worker{
-			Address: args.WorkerAddr,
+			fmt.Printf(
+				"Assigned task %d with file %v of type %v to %s\n",
+				task.ID, task.Input, task.Type, args.WorkerAddr,
+			)
+			return nil
+		default:
+			reply.TaskID = -1 // no map task left to assign for now
+			return nil
 		}
 	}
 
-	c.Workers[args.WorkerAddr].LastSeen = time.Now()
+	if c.NumFinishReduceTask < c.nReduce {
+		select {
+		case task := <-c.reduceTaskChan:
+			task.State = InProgress
+			task.WorkerAddr = args.WorkerAddr
 
+			reply.TaskID = task.ID
+			reply.TaskType = task.Type
+			reply.ReduceID = task.ReduceID
+			outputLocations := make(map[string][]string, 0)
+			for address, filenames := range c.IntermediateFiles {
+				for _, filename := range filenames {
+					pattern := fmt.Sprintf("/tmp/mr_map/%d/", task.ReduceID)
+					if strings.Contains(filename, pattern) {
+						outputLocations[address] = append(outputLocations[address], filename)
+					}
+				}
+			}
+
+			reply.MapOutputLocations = outputLocations
+			fmt.Printf(
+				"Assigned task %d with file %v of type %v to %s\n",
+				task.ID, task.Input, task.Type, args.WorkerAddr,
+			)
+			return nil
+		default:
+			reply.TaskID = -1 // no reduce task left to assign for now
+			return nil
+		}
+	}
+
+	// to indicate we have not assigned worker any task now
+	reply.TaskID = -1
 	return nil
 }
 
@@ -268,11 +231,15 @@ func (c *Coordinator) checkHeartbeat(ctx context.Context) {
 					fmt.Printf("Worker not responding so deleting all task of worker %s\n\n", workerAddr)
 					for _, task := range c.Tasks {
 						if task.WorkerAddr == workerAddr {
+							if task.State == Completed {
+								c.NumFinishMapTask--
+							}
 							task.State = Idle
 							c.mapTaskChan <- task
 						}
 					}
 					delete(c.Workers, workerAddr)
+					delete(c.IntermediateFiles, workerAddr)
 				}
 			}
 			c.mu.Unlock()
@@ -280,6 +247,49 @@ func (c *Coordinator) checkHeartbeat(ctx context.Context) {
 			break
 		}
 	}
+}
+
+func (c *Coordinator) ReportMapStatus(args *ReportMapStatusArgs, reply *ReportMapStatusReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	task, ok := c.Tasks[args.TaskID]
+	if !ok {
+		return fmt.Errorf("Task not found")
+	}
+
+	if task.State == Failed {
+		task.State = Idle
+		c.mapTaskChan <- task
+		fmt.Println(args.Error)
+		return nil
+	}
+
+	task.State = Completed
+
+	c.IntermediateFiles[args.WorkerAddr] = append(
+		c.IntermediateFiles[args.WorkerAddr],
+		args.IntermediateFiles...,
+	)
+
+	c.NumFinishMapTask++
+	return nil
+}
+
+func (c *Coordinator) ReportHeartbeat(args *ReportHeartbeatArgs, reply *ReportHeartbeatReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	fmt.Println("Heartbeat: ", args.WorkerAddr)
+	if _, exists := c.Workers[args.WorkerAddr]; !exists {
+		c.Workers[args.WorkerAddr] = &Worker{
+			Address: args.WorkerAddr,
+		}
+	}
+
+	c.Workers[args.WorkerAddr].LastSeen = time.Now()
+
+	return nil
 }
 
 func (c *Coordinator) ReportReduceStatus(args *ReportReduceStatusArgs, reply *ReportReduceStatusReply) error {

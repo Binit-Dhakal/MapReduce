@@ -13,11 +13,11 @@ type ReduceWorker struct {
 	reduceID        int
 	reducef         ReduceFunc
 	taskID          int
-	outputLocations []MapOutputLocation
+	outputLocations map[string][]string
 	outputFiles     []string
 }
 
-func NewReduceWorker(taskID int, reduceID int, reducef ReduceFunc, outputLocations []MapOutputLocation) *ReduceWorker {
+func NewReduceWorker(taskID int, reduceID int, reducef ReduceFunc, outputLocations map[string][]string) *ReduceWorker {
 	return &ReduceWorker{
 		taskID:          taskID,
 		reduceID:        reduceID,
@@ -79,43 +79,45 @@ func (r *ReduceWorker) ExecuteReduce() error {
 }
 
 // save all intermediate files(specific to this partition) to our local disk
-func (r *ReduceWorker) findFileForPartition(outputs []MapOutputLocation, reduceID int) {
+func (r *ReduceWorker) findFileForPartition(outputs map[string][]string, reduceID int) {
 	tempDir := fmt.Sprintf("/tmp/mr_reducer_%d/", reduceID)
 	os.MkdirAll(tempDir, 0755)
 
-	for _, output := range outputs {
-		filename := fmt.Sprintf("task-%d-part-%d", output.TaskID, output.PartID)
-		args := GetIntermediateFileArgs{
-			Filename: fmt.Sprintf("/tmp/%s", filename),
-		}
-		reply := GetIntermediateFileReply{}
+	for address, filenames := range outputs {
+		for _, filename := range filenames {
+			args := GetIntermediateFileArgs{
+				Filename: filename,
+			}
+			reply := GetIntermediateFileReply{}
 
-		ok := call(
-			"Worker.GetIntermediateFile",
-			&args,
-			&reply,
-			output.WorkerAddress,
-		)
-		// TODO: inform coordinator that we couldn't connect with the worker so coordinator
-		// can mark the worker as failed
-		if !ok {
-			log.Printf("Worker %s is not responding to get file %s", output.WorkerAddress, filename)
-			continue
-		}
+			ok := call(
+				"Worker.GetIntermediateFile",
+				&args,
+				&reply,
+				address,
+			)
+			// TODO: inform coordinator that we couldn't connect with the worker so coordinator
+			// can mark the worker as failed
+			if !ok {
+				log.Printf("Worker %s is not responding to get file %s", address, filename)
+				continue
+			}
 
-		tempFilePath := filepath.Join(tempDir, filename)
-		tempFile, err := os.Create(tempFilePath)
-		if err != nil {
-			log.Fatalf("Failed to create temp file: %v", err)
-		}
+			filename = filepath.Base(filename)
+			tempFilePath := filepath.Join(tempDir, filename)
+			tempFile, err := os.Create(tempFilePath)
+			if err != nil {
+				log.Fatalf("Failed to create temp file: %v", err)
+			}
 
-		_, err = tempFile.Write(reply.Content)
-		if err != nil {
-			log.Fatalf("Failed to write to temp file: %v", err)
-		}
+			_, err = tempFile.Write(reply.Content)
+			if err != nil {
+				log.Fatalf("Failed to write to temp file: %v", err)
+			}
 
-		r.outputFiles = append(r.outputFiles, tempFilePath)
-		tempFile.Close()
+			r.outputFiles = append(r.outputFiles, tempFilePath)
+			tempFile.Close()
+		}
 	}
 
 }

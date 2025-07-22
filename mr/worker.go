@@ -51,6 +51,7 @@ func NewWorker(mapf MapFunc, reducef ReduceFunc) {
 
 			taskID := assignReply.TaskID
 			if taskID == -1 {
+				// try again
 				time.Sleep(3 * time.Second)
 				continue
 			}
@@ -60,6 +61,7 @@ func NewWorker(mapf MapFunc, reducef ReduceFunc) {
 
 			switch assignReply.TaskType {
 			case Map:
+
 				mapWorker := NewMapWorker(
 					assignReply.TaskFile, taskID, partitionCount, mapf,
 				)
