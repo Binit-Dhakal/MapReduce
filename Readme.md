@@ -2,6 +2,8 @@
 
 This repository contains a basic implementation of the MapReduce programming model in Go. It's designed to be a learning tool and a starting point for building more complex distributed data processing systems.
 
+![usage](./assets/mapreduce-run.gif)
+
 ## Overview
 
 MapReduce is a programming model and an associated implementation for processing and generating large datasets.  Programs written in the MapReduce style are automatically parallelized and executed on a cluster of machines.

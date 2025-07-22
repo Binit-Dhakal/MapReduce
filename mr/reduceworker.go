@@ -89,7 +89,6 @@ func (r *ReduceWorker) findFileForPartition(reduceID int) {
 	curCount := 0
 	for {
 		wasFailure := false
-		fmt.Println("Pinging for new data")
 
 		getLocationsArgs := GetReduceInputLocationArgs{PartitionID: reduceID}
 		getLocationsReply := GetReduceInputLocationReply{}

@@ -148,6 +148,7 @@ func (c *Coordinator) Done() bool {
 			reply := &ShutdownWorkerReply{}
 			call("Worker.ShutdownWorker", args, reply, workerAddr)
 		}
+		fmt.Println("All Task Completed")
 	}
 
 	return allDone
@@ -156,8 +157,6 @@ func (c *Coordinator) Done() bool {
 func (c *Coordinator) AssignTask(args *AssignTaskArgs, reply *AssignTaskReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	fmt.Println(c.nFile, c.NumFinishMapTask)
 
 	if c.NumFinishMapTask < c.nFile {
 		select {
@@ -171,8 +170,8 @@ func (c *Coordinator) AssignTask(args *AssignTaskArgs, reply *AssignTaskReply) e
 			reply.PartitionCount = c.nReduce
 
 			fmt.Printf(
-				"Assigned task %d with file %v of type %v to %s\n",
-				task.ID, task.Input, task.Type, args.WorkerAddr,
+				"Assigned task %d  of type %v to %s\n",
+				task.ID, task.Type, args.WorkerAddr,
 			)
 			return nil
 		default:
@@ -192,8 +191,8 @@ func (c *Coordinator) AssignTask(args *AssignTaskArgs, reply *AssignTaskReply) e
 			reply.ReduceID = task.ReduceID
 
 			fmt.Printf(
-				"Assigned task %d with file %v of type %v to %s\n",
-				task.ID, task.Input, task.Type, args.WorkerAddr,
+				"Assigned task %d of type %v to %s\n",
+				task.ID, task.Type, args.WorkerAddr,
 			)
 			return nil
 		default:
@@ -229,19 +228,14 @@ func (c *Coordinator) GetReduceInputLocation(args *GetReduceInputLocationArgs, r
 func (c *Coordinator) ReportFileInaccessible(args *ReportFileInaccessibleArgs, reply *ReportFileInaccessibleReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	fmt.Printf("Worker Inaccessible: %v", args.WorkerAddress)
 
 	for _, task := range c.Tasks {
 		if task.WorkerAddr == args.WorkerAddress {
 			if task.State == Completed {
 				c.NumFinishMapTask--
 			}
-			fmt.Printf("Task change to idle: %+v\n", task)
-			task.WorkerAddr = ""
 			task.State = Idle
 			c.mapTaskChan <- task
-
-			fmt.Printf("Task added to map channel: %+v\n", task)
 		}
 	}
 
@@ -316,7 +310,6 @@ func (c *Coordinator) ReportHeartbeat(args *ReportHeartbeatArgs, reply *ReportHe
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	fmt.Println("Heartbeat: ", args.WorkerAddr)
 	if _, exists := c.Workers[args.WorkerAddr]; !exists {
 		c.Workers[args.WorkerAddr] = &Worker{
 			Address: args.WorkerAddr,
