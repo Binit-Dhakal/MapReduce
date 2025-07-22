@@ -64,6 +64,13 @@ type ReportHeartbeatArgs struct {
 type ReportHeartbeatReply struct {
 }
 
+// Shutdown Worker
+type ShutdownWorkerArgs struct {
+}
+
+type ShutdownWorkerReply struct {
+}
+
 func coordinatorSock() string {
 	return fmt.Sprintf("/var/tmp/mr-%d", os.Getuid())
 }

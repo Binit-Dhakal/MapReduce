@@ -1,6 +1,9 @@
 package mr
 
-import "strings"
+import (
+	"hash/fnv"
+	"strings"
+)
 
 type KeyValue struct {
 	Key   string
@@ -48,4 +51,9 @@ func (h *MinHeap) Pop() any {
 func parseLine(line string) (string, string) {
 	parts := strings.SplitN(line, " ", 2)
 	return parts[0], parts[1]
+}
+func ihash(key string) int {
+	h := fnv.New32a()
+	h.Write([]byte(key))
+	return int(h.Sum32() & 0x7fffffff)
 }

@@ -175,6 +175,14 @@ func (c *Coordinator) Done() bool {
 		}
 	}
 
+	if allDone {
+		args := &ShutdownWorkerArgs{}
+		for workerAddr, _ := range c.Workers {
+			reply := &ShutdownWorkerReply{}
+			call("Worker.ShutdownWorker", args, reply, workerAddr)
+		}
+	}
+
 	return allDone
 }
 
@@ -211,8 +219,6 @@ func (c *Coordinator) ReportHeartbeat(args *ReportHeartbeatArgs, reply *ReportHe
 	defer c.mu.Unlock()
 
 	fmt.Println("Heartbeat: ", args.WorkerAddr)
-	fmt.Println("Workers: ", c.Workers)
-
 	if _, exists := c.Workers[args.WorkerAddr]; !exists {
 		c.Workers[args.WorkerAddr] = &Worker{
 			Address: args.WorkerAddr,
